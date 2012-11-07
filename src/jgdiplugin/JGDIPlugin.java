@@ -32,7 +32,7 @@ import com.sun.grid.jgdi.event.EventTypeEnum;
 import java.util.*;
 import jgdiplugin.accounting.ARCODatabase;
 import jgdiplugin.accounting.SGEAccountingThread;
-import plgrid.FinishedJobInfo;
+import plgrid.GridJobArgument;
 import plgrid.GridJobInfo;
 import plgrid.GridJobSubmitInfo;
 import plgrid.PipelineGridPlugin;
@@ -77,6 +77,10 @@ public class JGDIPlugin extends PipelineGridPlugin {
             ex.printStackTrace();
             return;
         }
+
+        // turn on SGE Accounting thread if it is off.
+        sgeAccountingThread = new SGEAccountingThread(SGE_ROOT, SGE_CELL);
+        sgeAccountingThread.start();
 
         HeartBeatTimerTask tt = new HeartBeatTimerTask();
 
@@ -237,7 +241,7 @@ public class JGDIPlugin extends PipelineGridPlugin {
                     throw new Exception("Failed to get Executable Location");
                 }
 
-                List<String> arguments = gji.getArguments();
+                List<GridJobArgument> arguments = gji.getArguments();
 
                 if (arguments == null || arguments.contains(null)) {
                     throw new Exception("Failed to get command line arguments");
@@ -290,9 +294,12 @@ public class JGDIPlugin extends PipelineGridPlugin {
                     cmd.append(gji.getCommand());   // executable
 
                     // Arguments of executable
-                    for (String arg : arguments) {
-                        cmd.append(" ");
-                        cmd.append(arg);
+                    for (GridJobArgument arg : arguments) {
+                        String argValue = arg.getValue();
+                        if (argValue != null) {
+                            cmd.append(" ");
+                            cmd.append(argValue);
+                        }
                     }
                 }
 
@@ -347,7 +354,8 @@ public class JGDIPlugin extends PipelineGridPlugin {
                         int spaceIndex = sub.indexOf(" ");
 
                         if (spaceIndex != -1) {
-                            return sub.substring(0, spaceIndex);
+                            String jobId = sub.substring(0, spaceIndex);
+                            return jobId;
                         }
                         break;
                     }
@@ -396,6 +404,7 @@ public class JGDIPlugin extends PipelineGridPlugin {
         List<GridJobInfo> ret = new LinkedList<GridJobInfo>();
 
         if (jgdi == null) {
+            System.err.println("JGDI is not properly initialized, returning NULL.");
             return null;
         }
 
@@ -523,18 +532,20 @@ public class JGDIPlugin extends PipelineGridPlugin {
 
         int taskId = 1;
 
+        String jobIdOnly = jobId;
+        
         if (jobId.contains(".")) {
             String strTaskId = jobId.substring(jobId.indexOf(".") + 1);
             taskId = Integer.valueOf(strTaskId);
-            jobId = jobId.substring(0, jobId.indexOf("."));
+            jobIdOnly = jobId.substring(0, jobId.indexOf("."));
         }
 
 
         try {
             if (j == null) {
-                j = jgdi.getJob(Integer.valueOf(jobId));
+                j = jgdi.getJob(Integer.valueOf(jobIdOnly));
                 if (j == null) {
-                    return null;
+                	return getFinishedJobInfo(jobId);
                 }
             }
 
@@ -563,14 +574,6 @@ public class JGDIPlugin extends PipelineGridPlugin {
                     }
                 }
 
-
-                // SGE starts to run jobs in order, which means that if Job 5 is running, then 1-4 are running
-                // or have completed already. If we reach this part and the task was not listed j.getJaTasksList()
-                // then job should be already finished. 
-                if (taskId <= maxTaskId) {
-                    return null;
-                }
-
                 // In cases where the task number is >maxTaskId, which can happen for example
                 // in case when task 5 is completed in jobs with tasks 1-5 and pipeline wants to
                 // know more about it when task 4 is running, then it will be hard to tell whether
@@ -578,12 +581,14 @@ public class JGDIPlugin extends PipelineGridPlugin {
                 // help us with this. If job is found in ARCo database, then it has been finished. So
                 // we need to return null to tell pipeline that the requested job is not an active job.
 
-                if (getFinishedJobInfo(jobId + "." + taskId) != null) {
-                    return null;
+                GridJobInfo fji = getFinishedJobInfo(jobId);
+                if (fji != null && fji.getState() != GridJobInfo.STATE_NOT_FOUND) {
+                    return fji;
+                } else {
+                    gji.setQueuedTime((long) j.getSubmissionTime() * 1000L);
+                    gji.setState(GridJobInfo.STATE_QUEUED);
                 }
 
-                gji.setQueuedTime((long) j.getSubmissionTime() * 1000L);
-                gji.setState(GridJobInfo.STATE_QUEUED);
 
             }
         } catch (JGDIException ex) {
@@ -601,9 +606,8 @@ public class JGDIPlugin extends PipelineGridPlugin {
         return getJobInfo(jobId, null);
     }
 
-    @Override
-    public FinishedJobInfo getFinishedJobInfo(String jobId) throws PLGrid_InvalidMethodException {
-        FinishedJobInfo fji = null;
+    private GridJobInfo getFinishedJobInfo(String jobId) throws PLGrid_InvalidMethodException {
+        GridJobInfo fji = null;
         if (finishedJobRetrievalMethod == null || finishedJobRetrievalMethod.trim().length() == 0) {
             fji = sgeAccountingThread.getFinishedJobInfo(jobId);
         } else if (finishedJobRetrievalMethod.toLowerCase().equals("arco")) {
@@ -715,7 +719,7 @@ public class JGDIPlugin extends PipelineGridPlugin {
     private SGEAccountingThread sgeAccountingThread;
     private String finishedJobRetrievalMethod;
     private ARCODatabase arcoDatabase;
-    public static final String JGDI_PLUGIN_VERSION = "2.1";
+    public static final String JGDI_PLUGIN_VERSION = "3.0";
     private static final int PING_QMASTER_INTERVAL_MS = 15000;
     private String bootstrapURL;
     private JGDI jgdi = null;

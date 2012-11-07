@@ -26,6 +26,7 @@ package jgdiplugin;
 import com.sun.grid.jgdi.event.Event;
 import com.sun.grid.jgdi.event.EventListener;
 import com.sun.grid.jgdi.event.JobTaskModEvent;
+import plgrid.event.EventFinished;
 import plgrid.event.EventQueued;
 import plgrid.event.EventRunning;
 
@@ -51,23 +52,23 @@ public class JGDIJobModListener implements EventListener {
 
                 String jobId = String.valueOf(jtme.getJobId());
                 String taskId = String.valueOf(jtme.getTaskNumber());
-
-
-
+                
                 switch (state) {
+                    case STATE_RUNNING + STATE_DELETED: // dr
+                        plugin.fireEvent(new EventFinished(String.valueOf(jobId), "0", jtme.getTimestamp() * 1000, -88));
+                        break;
                     case STATE_RUNNING:
-                        plugin.sendEvent(new EventRunning(jobId, taskId));
+                        plugin.fireEvent(new EventRunning(jobId, taskId));
                         break;
                     case STATE_QUEUED:
                     case (STATE_QUEUED + STATE_WAITING):
-                        plugin.sendEvent(new EventQueued(jobId, taskId));
+                        plugin.fireEvent(new EventQueued(jobId, taskId));
                         break;
                     case (STATE_QUEUED + STATE_WAITING + STATE_ERROR): // Eqw
-                        plugin.sendEvent(new EventQueued(jobId, taskId, "Eqw"));
+                        plugin.fireEvent(new EventQueued(jobId, taskId, "Eqw"));
                         break;
                     default:
                         System.out.println(" WARNING: Job " + jtme.getJobId() + " changed status to " + state);
-
                 }
             } catch (Exception ex) {
                 ex.printStackTrace();
@@ -87,7 +88,7 @@ public class JGDIJobModListener implements EventListener {
     public static final int STATE_RUNNING = 0x00000080;
 //private static final int STATE_SUSPENDED                 = 0x00000100;
 //private static final int STATE_TRANSFERING               = 0x00000200;
-//private static final int STATE_DELETED                   = 0x00000400;
+    private static final int STATE_DELETED = 0x00000400;
     private static final int STATE_WAITING = 0x00000800;
 //private static final int STATE_EXITING                   = 0x00001000;
 //private static final int STATE_WRITTEN                   = 0x00002000;

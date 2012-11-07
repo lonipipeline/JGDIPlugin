@@ -34,13 +34,13 @@ import plgrid.event.EventFinished;
  * @author Petros Petrosyan
  */
 public class JGDIJobFinishListener implements EventListener {
-
+    
     private JGDIPlugin plugin;
-
+    
     public JGDIJobFinishListener(JGDIPlugin plugin) {
         this.plugin = plugin;
     }
-
+    
     public void eventOccured(Event evt) {
         if (evt instanceof JobFinalUsageEvent) {
             try {
@@ -48,50 +48,58 @@ public class JGDIJobFinishListener implements EventListener {
                 // Get the job Id
                 String jobId = String.valueOf(jfue.getJobId());
                 String taskId = String.valueOf(jfue.getTaskId());
-
-
+                
+                
                 if (jfue.getLoadValueNames().size() != 0) {
                     // Get the exit status
                     Double dblExitStatus = jfue.getLoadValue("exit_status");
-
+                    
                     int exit_status = 0;
                     boolean failed = false;
-
+                    
                     if (dblExitStatus != null) {
                         exit_status = dblExitStatus.intValue();
                     } else {
                         System.err.println("ERROR: Failed to get exit status of job " + jobId);
                         failed = true;
                     }
-
+                    
                     long endTime = 0;
                     long startTime = 0;
                     // Get the finish time and start time
                     Double dblEndTime = jfue.getLoadValue("end_time");
                     Double dblStartTime = jfue.getLoadValue("start_time");
-
+                    Double dblUtime = jfue.getLoadValue("ru_utime");
+                    
                     if (dblEndTime != null && dblStartTime != null) {
                         endTime = dblEndTime.longValue() * 1000;
                         startTime = dblStartTime.longValue() * 1000;
+                        
+                        if (endTime == startTime && dblUtime > 0) {                            
+                            endTime += 1000 * dblUtime;
+                        }
                     } else {
                         System.err.println("ERROR: Failed to get time of job " + jobId + " Not sending event. End time=" + dblEndTime + " Start time=" + dblStartTime);
                         failed = true;
                     }
-
+                    
+                    
                     if (endTime > 0 && !failed) {
-                        plugin.sendEvent(new EventFinished(jobId, taskId, endTime, startTime, exit_status));
+                        plugin.fireEvent(new EventFinished(jobId, taskId, endTime, startTime, exit_status));
+                    } else {                        
+                        System.err.println("ERROR: Job " + jobId + "." + taskId + " finished but endTime is " + endTime);
                     }
                 } else {
                     System.err.println("ERROR: Job " + jobId + "." + taskId + " finished but doesn't have load values.");
                 }
-
+                
             } catch (Exception ex) {
                 ex.printStackTrace();
             }
         } else if (evt instanceof JobDelEvent) {
             JobDelEvent jde = (JobDelEvent) evt;
-
-            plugin.sendEvent(new EventFinished(String.valueOf(jde.getJobNumber()), "0", jde.getTimestamp() * 1000, -88));
+            
+            plugin.fireEvent(new EventFinished(String.valueOf(jde.getJobNumber()), "0", jde.getTimestamp() * 1000, -88));
         }
     }
 }

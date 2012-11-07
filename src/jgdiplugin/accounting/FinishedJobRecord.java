@@ -107,6 +107,12 @@ public class FinishedJobRecord {
                 case 13:
                     exit_status = Integer.parseInt(val);
                     break;
+                case 15:
+                    ru_utime = val;
+                    break;
+                case 16:
+                    ru_stime = val;
+                    break;
             }
         }
     }

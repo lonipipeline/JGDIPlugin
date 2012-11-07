@@ -29,7 +29,7 @@ import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.CopyOnWriteArraySet;
 import java.util.concurrent.Semaphore;
-import plgrid.FinishedJobInfo;
+import plgrid.GridJobInfo;
 import plgrid.PipelineGridPlugin;
 
 /**
@@ -178,12 +178,14 @@ public class ARCODatabase {
         semaphore.release();
     }
 
-    public FinishedJobInfo getFinishedJobInfo(String jobId) {
+    public GridJobInfo getFinishedJobInfo(String jobId) {
         if (!initialized) {
             return null;
         }
 
-        FinishedJobInfo fji = new FinishedJobInfo(jobId);
+        GridJobInfo gji = new GridJobInfo(jobId);
+
+        gji.setState(GridJobInfo.STATE_NOT_FOUND);
 
         Connection connection = null;
         Statement statement = null;
@@ -236,16 +238,15 @@ public class ARCODatabase {
 
                     // If found real end time for the job, break the loop
                     if (end_time > 0 && start_time > 0) {
-                        fji.setExitStatus(exit_status);
-                        fji.setStartTimestamp(start_timestamp);
-                        fji.setEndTimestamp(end_timestamp);
+                        gji.setState(GridJobInfo.STATE_FINISHED);
+                        gji.setExitStatus(exit_status);
+                        gji.setStartTime(start_timestamp.getTime());
+                        gji.setFinishTime(end_timestamp.getTime());
 
-                        return fji;
+                        break;
                     }
                 } while (rs.next()); // There can be multiple items for same job id
 
-            } else {
-                return null;
             }
 
             rs.close();
@@ -259,6 +260,6 @@ public class ARCODatabase {
             }
         }
 
-        return fji;
+        return gji;
     }
 }
