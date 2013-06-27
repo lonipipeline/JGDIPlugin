@@ -1,5 +1,5 @@
 /*
- Copyright 2000-2012  Laboratory of Neuro Imaging (LONI), <http://www.LONI.ucla.edu/>.
+ Copyright 2000-2013  Laboratory of Neuro Imaging (LONI), <http://www.LONI.ucla.edu/>.
 
  This file is part of the LONI Pipeline Plug-ins (LPP), not the LONI Pipeline itself;
  see <http://pipeline.loni.ucla.edu/>.
@@ -72,15 +72,20 @@ public class JGDIPlugin extends PipelineGridPlugin {
 
         try {
             jgdi = JGDIFactory.newSynchronizedInstance(bootstrapURL);
-            registerListeners();
+            if (!TEST_MODE) {
+                registerListeners();
+            }
         } catch (Exception ex) {
             ex.printStackTrace();
             return;
         }
 
-        // turn on SGE Accounting thread if it is off.
-        sgeAccountingThread = new SGEAccountingThread(SGE_ROOT, SGE_CELL);
-        sgeAccountingThread.start();
+        if (!TEST_MODE) {
+            // turn on SGE Accounting thread if it is off.
+            sgeAccountingThread = new SGEAccountingThread(SGE_ROOT, SGE_CELL);
+            sgeAccountingThread.setName("SGEAccountingThread");
+            sgeAccountingThread.start();
+        }
 
         HeartBeatTimerTask tt = new HeartBeatTimerTask();
 
@@ -158,32 +163,37 @@ public class JGDIPlugin extends PipelineGridPlugin {
     }
 
     public void pingQmaster() {
-        try {
-            JGDI j = JGDIFactory.newSynchronizedInstance(bootstrapURL);
 
-            if (!isQmasterAlive) {
-                System.err.println(new Date() + ": S U C C E S S: Qmaster restored");
-                isQmasterAlive = true;
-                jgdi = j;
-                registerListeners();
-            } else {
-                j.close();
-            }
-            return;
-        } catch (Exception ex) {
-            // we don't need to print errors when qmaster is down
-            //ex.printStackTrace();
-        }
-
-        if (isQmasterAlive) {
-            System.err.println(new Date() + ": W A R N I N G: Qmaster CRASH detected");
-            isQmasterAlive = false;
+        // The Ping Qmaster only works with SGE 6.2 u1
+        // This check is for convenience. 
+        if (SGE_ROOT.endsWith("6.2u1")) {
             try {
-                finishEventClient.close();
-                modEventClient.close();
-                downEventClient.close();
+                JGDI j = JGDIFactory.newSynchronizedInstance(bootstrapURL);
+
+                if (!isQmasterAlive) {
+                    System.err.println(new Date() + ": S U C C E S S: Qmaster restored");
+                    isQmasterAlive = true;
+                    jgdi = j;
+                    registerListeners();
+                } else {
+                    j.close();
+                }
+                return;
             } catch (Exception ex) {
-                ex.printStackTrace();
+                // we don't need to print errors when qmaster is down
+                //ex.printStackTrace();
+            }
+
+            if (isQmasterAlive) {
+                System.err.println(new Date() + ": W A R N I N G: Qmaster CRASH detected");
+                isQmasterAlive = false;
+                try {
+                    finishEventClient.close();
+                    modEventClient.close();
+                    downEventClient.close();
+                } catch (Exception ex) {
+                    ex.printStackTrace();
+                }
             }
         }
     }
@@ -410,6 +420,9 @@ public class JGDIPlugin extends PipelineGridPlugin {
 
         try {
             List<Job> qJobs = jgdi.getJobList(); // Get current jobs from JGDI
+            if (TEST_MODE) {
+                System.out.println("qJobs.size = " + qJobs.size());
+            }
 
             Map<String, String> complexVars = new HashMap<String, String>();
 
@@ -485,6 +498,15 @@ public class JGDIPlugin extends PipelineGridPlugin {
                 }
             }
 
+            if (TEST_MODE) {
+                System.out.println("plJobs.size = " + qJobs.size());
+
+                for (Job j : plJobs) {
+                    System.out.println(j.getJobNumber());
+
+                }
+            }
+
             for (Job j : plJobs) {
 
                 String jobId = String.valueOf(j.getJobNumber());
@@ -498,13 +520,21 @@ public class JGDIPlugin extends PipelineGridPlugin {
 
                         GridJobInfo gji = getJobInfo(jobId + "." + taskNum, j);
 
-                        if (gji != null) {
+                        if (gji != null
+                                && gji.getState() != GridJobInfo.STATE_NOT_FOUND
+                                && gji.getState() != GridJobInfo.STATE_FINISHED) {
                             ret.add(gji);
                         }
                     } else if (taskList.isEmpty()) {
                         // When jobs are queued, their taskList is empty, we need to dig their structure and find out 
                         // the range of the tasks which needs to be executed. 
                         Range range = j.getJaStructure(0);
+
+                        if (TEST_MODE) {
+                            System.out.println("==================== JOB " + j.getJobNumber() + " =========");
+                            System.out.println(j.dump());
+                            System.out.println("============================================");
+                        }
 
                         for (int i = range.getMin(); i <= range.getMax(); i += range.getStep()) {
                             ret.add(getJobInfo(jobId + "." + i, j));
@@ -559,41 +589,44 @@ public class JGDIPlugin extends PipelineGridPlugin {
                 gji.setQueuedTime((long) j.getSubmissionTime() * 1000L);
                 gji.setState(GridJobInfo.STATE_QUEUED);
             } else {
-                int maxTaskId = 0;
+
+                JobTask jobTask = null;
+
                 for (JobTask jt : j.getJaTasksList()) {
                     int taskNum = jt.getTaskNumber();
-
                     if (taskNum == taskId) {
-                        gji.setStartTime((long) jt.getStartTime() * 1000L);
-                        gji.setState(GridJobInfo.STATE_RUNNING);
-                        return gji;
-                    }
-
-                    if (taskNum > maxTaskId) {
-                        maxTaskId = taskNum;
+                        jobTask = jt;
+                        break;
                     }
                 }
 
-                // In cases where the task number is >maxTaskId, which can happen for example
-                // in case when task 5 is completed in jobs with tasks 1-5 and pipeline wants to
-                // know more about it when task 4 is running, then it will be hard to tell whether
-                // task 5 has been finished or is queued, that's why we can ask ARCo database to
-                // help us with this. If job is found in ARCo database, then it has been finished. So
-                // we need to return null to tell pipeline that the requested job is not an active job.
+                if (jobTask != null) {
+
+                    try {
+                        Double d = jobTask.getUsage("end_time");
+                        if (d.longValue() > 0) {
+                            return getFinishedJobInfo(jobId);
+                        }
+                    } catch (Exception ex) {
+                    }
+
+                    gji.setStartTime((long) jobTask.getStartTime() * 1000L);
+                    gji.setState(GridJobInfo.STATE_RUNNING);
+                    return gji;
+                }
 
                 GridJobInfo fji = getFinishedJobInfo(jobId);
-                if (fji != null && fji.getState() != GridJobInfo.STATE_NOT_FOUND) {
+                if (fji != null) {
                     return fji;
-                } else {
-                    gji.setQueuedTime((long) j.getSubmissionTime() * 1000L);
-                    gji.setState(GridJobInfo.STATE_QUEUED);
                 }
-
-
             }
         } catch (JGDIException ex) {
-
             ex.printStackTrace();
+            if ( ex.getMessage().contains("unable to contact qmaster using port") ) {
+                isQmasterAlive = false;
+                System.err.println("Qmaster is unavailable. ");
+            }
+            
         } catch (Exception ex) {
             ex.printStackTrace();
         }
@@ -712,14 +745,32 @@ public class JGDIPlugin extends PipelineGridPlugin {
     public static void main(String[] args) {
         System.out.println("PipelineGridPlugin version " + PipelineGridPlugin.VERSION);
         System.out.println("JGDI Plugin version " + JGDI_PLUGIN_VERSION);
+
+        TEST_MODE = true;
+
+        /* Test mode example */
+        
+        /*
+        JGDIPlugin pl = new JGDIPlugin();
+        List<GridJobInfo> jobs = pl.getJobList("pipeline,pl_id=medulla");
+
+        System.out.println("Active jobs (" + jobs.size() + "):");
+        for (GridJobInfo gji : jobs) {
+            System.out.println(gji.getJobId());
+        }
+        System.exit(0);
+
+        */
     }
+    
+    private static boolean TEST_MODE;
     private final String SGE_ROOT;
     private final String SGE_CELL;
     private final String SGE_PORT;
     private SGEAccountingThread sgeAccountingThread;
     private String finishedJobRetrievalMethod;
     private ARCODatabase arcoDatabase;
-    public static final String JGDI_PLUGIN_VERSION = "3.0";
+    public static final String JGDI_PLUGIN_VERSION = "3.0.2";
     private static final int PING_QMASTER_INTERVAL_MS = 15000;
     private String bootstrapURL;
     private JGDI jgdi = null;

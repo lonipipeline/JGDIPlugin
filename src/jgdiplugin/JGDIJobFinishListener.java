@@ -1,5 +1,5 @@
 /*
- Copyright 2000-2012  Laboratory of Neuro Imaging (LONI), <http://www.LONI.ucla.edu/>.
+ Copyright 2000-2013  Laboratory of Neuro Imaging (LONI), <http://www.LONI.ucla.edu/>.
 
  This file is part of the LONI Pipeline Plug-ins (LPP), not the LONI Pipeline itself;
  see <http://pipeline.loni.ucla.edu/>.
@@ -23,10 +23,12 @@
  */
 package jgdiplugin;
 
+import com.sun.grid.jgdi.configuration.JobTask;
 import com.sun.grid.jgdi.event.Event;
 import com.sun.grid.jgdi.event.EventListener;
 import com.sun.grid.jgdi.event.JobDelEvent;
 import com.sun.grid.jgdi.event.JobFinalUsageEvent;
+import java.util.List;
 import plgrid.event.EventFinished;
 
 /**
@@ -60,7 +62,7 @@ public class JGDIJobFinishListener implements EventListener {
                     if (dblExitStatus != null) {
                         exit_status = dblExitStatus.intValue();
                     } else {
-                        System.err.println("ERROR: Failed to get exit status of job " + jobId);
+                        System.err.println("ERROR: Failed to get exit status of job " + jobId + "." + taskId);
                         failed = true;
                     }
                     
@@ -79,15 +81,16 @@ public class JGDIJobFinishListener implements EventListener {
                             endTime += 1000 * dblUtime;
                         }
                     } else {
-                        System.err.println("ERROR: Failed to get time of job " + jobId + " Not sending event. End time=" + dblEndTime + " Start time=" + dblStartTime);
+                        System.err.println("ERROR: Failed to get time of job " + jobId + "." + taskId + " Not sending event. End time=" + dblEndTime + " Start time=" + dblStartTime);
                         failed = true;
                     }
-                    
-                    
-                    if (endTime > 0 && !failed) {
-                        plugin.fireEvent(new EventFinished(jobId, taskId, endTime, startTime, exit_status));
-                    } else {                        
-                        System.err.println("ERROR: Job " + jobId + "." + taskId + " finished but endTime is " + endTime);
+
+                    if (!failed) {
+                        if (endTime > 0) {
+                            plugin.fireEvent(new EventFinished(jobId, taskId, endTime, startTime, exit_status));
+                        } else {
+                            System.err.println("ERROR: Job " + jobId + "." + taskId + " finished but endTime is " + endTime);
+                        }
                     }
                 } else {
                     System.err.println("ERROR: Job " + jobId + "." + taskId + " finished but doesn't have load values.");

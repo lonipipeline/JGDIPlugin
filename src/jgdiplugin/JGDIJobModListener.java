@@ -1,5 +1,5 @@
 /*
- Copyright 2000-2012  Laboratory of Neuro Imaging (LONI), <http://www.LONI.ucla.edu/>.
+ Copyright 2000-2013  Laboratory of Neuro Imaging (LONI), <http://www.LONI.ucla.edu/>.
 
  This file is part of the LONI Pipeline Plug-ins (LPP), not the LONI Pipeline itself;
  see <http://pipeline.loni.ucla.edu/>.

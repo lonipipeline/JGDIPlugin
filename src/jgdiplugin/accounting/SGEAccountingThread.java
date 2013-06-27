@@ -1,5 +1,5 @@
 /*
- Copyright 2000-2012  Laboratory of Neuro Imaging (LONI), <http://www.LONI.ucla.edu/>.
+ Copyright 2000-2013  Laboratory of Neuro Imaging (LONI), <http://www.LONI.ucla.edu/>.
 
  This file is part of the LONI Pipeline Plug-ins (LPP), not the LONI Pipeline itself;
  see <http://pipeline.loni.ucla.edu/>.
@@ -28,6 +28,10 @@ import java.nio.channels.FileChannel;
 import java.sql.*;
 import java.text.NumberFormat;
 import java.util.Date;
+import java.util.LinkedList;
+import java.util.Set;
+import java.util.concurrent.CopyOnWriteArraySet;
+import java.util.concurrent.Semaphore;
 import java.util.zip.GZIPInputStream;
 import plgrid.GridJobInfo;
 
@@ -42,7 +46,6 @@ import plgrid.GridJobInfo;
 public class SGEAccountingThread extends Thread {
 
     private String filepath;
-    private final Connection dbConnection;
     private final String JOB_ID_COLUMN = "JOB_ID";
     private final String START_TIME_COLUMN = "START_TIME";
     private final String END_TIME_COLUMN = "END_TIME";
@@ -54,8 +57,19 @@ public class SGEAccountingThread extends Thread {
     private static NumberFormat formatter = NumberFormat.getInstance();
     private boolean parsedRotatedFile;
     private boolean shutdown;
+    private Semaphore semaphore;
+    private final LinkedList<Connection> availableConnections;
+    private final Set<Connection> allConnections;
+    private static final int MAX_CONCURRENT_DB_CONNECTIONS = 4;
+    private String databaseURL;
+    private String dbUsername;
+    private String dbPassword;
 
     public SGEAccountingThread(String sge_root, String sge_cell) {
+        semaphore = new Semaphore(1, true);
+        availableConnections = new LinkedList<Connection>();
+        allConnections = new CopyOnWriteArraySet<Connection>();
+
         StringBuilder sb = new StringBuilder();
 
         sb.append(sge_root);
@@ -68,16 +82,19 @@ public class SGEAccountingThread extends Thread {
 
         this.filepath = sb.toString();
 
-
+        
         String database = new File("accountingDB").getAbsolutePath();
 
-        Connection conn = null;
+        databaseURL = "jdbc:hsqldb:" + database;
+        dbUsername = "sa";
+        dbPassword = "";
 
+        Connection conn = null;
 
         try {
 
             Class.forName("org.hsqldb.jdbcDriver");
-            conn = DriverManager.getConnection("jdbc:hsqldb:" + database, "sa", "");
+            conn = DriverManager.getConnection(databaseURL, dbUsername, dbPassword);
 
 
 
@@ -88,9 +105,17 @@ public class SGEAccountingThread extends Thread {
                         + JOB_ID_COLUMN + " VARCHAR(32),"
                         + START_TIME_COLUMN + " BIGINT,"
                         + END_TIME_COLUMN + " BIGINT,"
-                        + EXIT_STATUS_COLUMN + " INT )");
+                        + EXIT_STATUS_COLUMN + " INT,"
+                        + "PRIMARY KEY(" + JOB_ID_COLUMN + "))");
             } catch (Exception ex) {
-                // HARMLESS 
+
+                // Try to add primary key 
+                try {
+                    stmt.execute("ALTER TABLE " + FINISHED_JOBS_TABLE + " ADD PRIMARY KEY (" + JOB_ID_COLUMN + ")");
+                } catch (Exception ex2) {
+                    // HARMLESS
+                }
+
             }
 
 
@@ -113,39 +138,115 @@ public class SGEAccountingThread extends Thread {
             ex.printStackTrace();
         }
 
-        dbConnection = conn;
+        allConnections.add(conn);
+        availableConnections.add(conn);
+
+        Thread t = new Thread() {
+            @Override
+            public void run() {
+                try {
+                    // populate our cache of connections
+                    for (int i = 1; i < MAX_CONCURRENT_DB_CONNECTIONS - 1; i++) {
+                        Connection conn = DriverManager.getConnection(databaseURL, dbUsername, dbPassword);
+
+                        availableConnections.add(conn);
+                        allConnections.add(conn);
+                        semaphore.release();
+                    }
+                } catch (SQLException ex) {
+                    ex.printStackTrace();
+                }
+            }
+        };
+
+        t.start();
 
     }
 
-    private ResultSet executeQuery(String query) {
+    private Connection acquireConnection() {
+        Connection conn = null;
+        try {
+            semaphore.acquire();
+        } catch (InterruptedException ex) {
+            throw new IllegalArgumentException("Interrupted while trying to acquire a DB connection");
+        }
 
-//        System.out.println("executeQuery:" + query);
+        // we synchronize this next bit, so the LinkedList doesn't throw a
+        // ConcurrentModificationException
+        synchronized (SGEAccountingThread.class) {
+            conn = availableConnections.removeFirst();
+        }
 
-        synchronized (dbConnection) {
-            try {
-                Statement stmt = dbConnection.createStatement();
+        return conn;
+    }
 
-                return stmt.executeQuery(query);
+    private void releaseConnection(Connection conn) {
 
-            } catch (Exception ex) {
-                ex.printStackTrace();
+        // verify that the connection being returned to us is actually one of ours
+        if (!allConnections.contains(conn)) {
+            throw new IllegalArgumentException("You must release the connection given to you");
+        }
+
+        try {
+            if (!conn.isValid(10)) {
+                conn.close();
+                // now we need to remove this connection from our set, and create a new one
+                allConnections.remove(conn);
+                availableConnections.remove(conn);
+
+                try {
+                    Class.forName("org.hsqldb.jdbcDriver");
+                    conn = DriverManager.getConnection(databaseURL, dbUsername, dbPassword);
+                    allConnections.add(conn);
+                    availableConnections.add(conn);
+                    // We do not add to available connections as this connections will be used now.
+                } catch (Exception ex) {
+                    ex.printStackTrace();
+                }
             }
+        } catch (SQLException ex) {
+        }
+
+        synchronized (SGEAccountingThread.class) {
+            availableConnections.add(conn);
+        }
+
+        semaphore.release();
+    }
+
+    private ResultSet executeQuery(String query) {
+        Connection conn = acquireConnection();
+
+        try {
+            Statement stmt = conn.createStatement();
+
+            stmt.setQueryTimeout(60);
+            
+            ResultSet ret = stmt.executeQuery(query);
+
+            return ret;
+
+        } catch (SQLException ex) {
+            ex.printStackTrace();
+        } finally {
+            releaseConnection(conn);
         }
 
         return null;
     }
 
     private int executeUpdate(String query) {
+        Connection conn = acquireConnection();
+        try {
+            Statement stmt = conn.createStatement();
 
-        synchronized (dbConnection) {
-            try {
-                Statement stmt = dbConnection.createStatement();
+            stmt.setQueryTimeout(60);
+            return stmt.executeUpdate(query);
 
-                return stmt.executeUpdate(query);
-
-            } catch (Exception ex) {
-                ex.printStackTrace();
-            }
+        } catch (SQLException ex) {
+            ex.printStackTrace();
+        } finally {
+            releaseConnection(conn);
         }
 
         return -1;
@@ -219,22 +320,16 @@ public class SGEAccountingThread extends Thread {
 
     @Override
     public void run() {
-
-        if (dbConnection == null) {
-            System.err.println("Error: Failed to initialize connection to database. SGE Accounting thread is not able to start.");
-            return;
-        }
-
-        int i = 1;
         do {
             parseFile(filepath, true, true);
-            i++;
-
+            
             if (shutdown) {
-                try {
-                    dbConnection.close();
-                } catch (Exception ex) {
-                    ex.printStackTrace();
+                for (Connection conn : allConnections) {
+                    try {
+                        conn.close();
+                    } catch (Exception ex) {
+                        ex.printStackTrace();
+                    }
                 }
                 break;
             }
@@ -424,7 +519,7 @@ public class SGEAccountingThread extends Thread {
                     break;
                 }
                 String response = br.readLine();
-
+                
                 if (response == null) {
                     if (!continious) {
                         break;
@@ -463,10 +558,16 @@ public class SGEAccountingThread extends Thread {
 ////                            + " startTime=" + r.start_time + " exitStatus=" + r.exit_status + ")");
 //                }
 
-                if (System.currentTimeMillis() - r.end_time < cutOffTime) {
-                    persist(r);
-                    numJobsAdded++;
-                }
+                
+//                
+//                
+//                if (System.currentTimeMillis() - r.end_time < cutOffTime) {
+//                    System.out.println("Persisting " + r.job_number);
+//                    persist(r);
+//                    numJobsAdded++;
+//                } else { 
+//                    System.out.println("NOT Persisting " + r.job_number);
+//                }
 
             }
         } catch (Exception ex) {
@@ -481,11 +582,6 @@ public class SGEAccountingThread extends Thread {
     }
 
     public GridJobInfo getFinishedJobInfo(String jobId) {
-        if (dbConnection == null) {
-            System.err.println("SGEAccountingThread: The database connection cannot be null.");
-            return null;
-        }
-
         GridJobInfo gji = new GridJobInfo(jobId);
         gji.setState(GridJobInfo.STATE_NOT_FOUND);
 
@@ -524,15 +620,11 @@ public class SGEAccountingThread extends Thread {
         } catch (Exception ex) {
             ex.printStackTrace();
         }
-        
+
         return gji;
     }
 
     private int cleanup(long cutOffTime) {
-        if (dbConnection == null) {
-            return 0;
-        }
-
         StringBuilder sb = new StringBuilder("DELETE FROM ");
         sb.append(FINISHED_JOBS_TABLE);
         sb.append(" WHERE ");
@@ -549,10 +641,6 @@ public class SGEAccountingThread extends Thread {
     }
 
     private void persist(FinishedJobRecord r) {
-        if (dbConnection == null) {
-            return;
-        }
-
         StringBuilder sb = new StringBuilder("SELECT ");
         sb.append(JOB_ID_COLUMN);
         sb.append(" FROM ");
@@ -570,7 +658,7 @@ public class SGEAccountingThread extends Thread {
 
         try {
             ResultSet rs = executeQuery(sb.toString());
-            if (rs != null && rs.next()) {
+            if (rs != null && rs.next()) {;
                 // already persisted
                 return;
             }
@@ -593,36 +681,39 @@ public class SGEAccountingThread extends Thread {
         sb.append(") VALUES (?,?,?,?)");
 
 
-        synchronized (dbConnection) {
-            try {
-                PreparedStatement stmt = dbConnection.prepareStatement(sb.toString());
 
-                String jobId = r.job_number;
+        Connection conn = acquireConnection();
 
-                if (r.task_number > 0) {
-                    jobId += "." + r.task_number;
-                }
+        try {
+            PreparedStatement stmt = conn.prepareStatement(sb.toString());
 
-                long startTime = r.start_time;
-                long endTime = r.end_time;
+            String jobId = r.job_number;
 
-                if (startTime == endTime) {
-                    Double utime = Double.parseDouble(r.ru_utime);
-
-                    if (utime != null && utime > 0) {
-                        endTime += utime * 1000;
-                    }
-                }
-
-                stmt.setString(1, jobId);
-                stmt.setLong(2, r.start_time);
-                stmt.setLong(3, r.end_time);
-                stmt.setInt(4, r.exit_status);
-
-                stmt.execute();
-            } catch (Exception ex) {
-                ex.printStackTrace();
+            if (r.task_number > 0) {
+                jobId += "." + r.task_number;
             }
+
+            long startTime = r.start_time;
+            long endTime = r.end_time;
+
+            if (startTime == endTime) {
+                Double utime = Double.parseDouble(r.ru_utime);
+
+                if (utime != null && utime > 0) {
+                    endTime += utime * 1000;
+                }
+            }
+
+            stmt.setString(1, jobId);
+            stmt.setLong(2, r.start_time);
+            stmt.setLong(3, r.end_time);
+            stmt.setInt(4, r.exit_status);
+
+            stmt.execute();
+        } catch (Exception ex) {
+            ex.printStackTrace();
+        } finally {
+            releaseConnection(conn);
         }
     }
 
